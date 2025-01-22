@@ -11,7 +11,6 @@ let g:loaded_ollama = 1
 " Configuration defaults
 let g:ollama_model = get(g:, 'ollama_model', 'llama2')
 let g:ollama_timeout = get(g:, 'ollama_timeout', 30)
-let g:ollama_max_tokens = get(g:, 'ollama_max_tokens', 2000)
 let g:ollama_window_position = get(g:, 'ollama_window_position', 'rightbelow')
 let g:ollama_window_size = get(g:, 'ollama_window_size', 15)
 let g:ollama_auto_install_model = get(g:, 'ollama_auto_install_model', 1)
@@ -29,7 +28,16 @@ function! s:DetectOS()
 endfunction
 
 function! s:HasCommand(cmd)
-    return executable(a:cmd)
+    if !executable(a:cmd)
+        call s:DisplayError("Command '" . a:cmd . "' not found. Please install it and ensure it is in your PATH.")
+        return 0
+    endif
+    return 1
+endfunction
+
+function! RestoreStatusLine()
+    let &statusline = ''
+    redraw
 endfunction
 
 function! s:InstallOllama()
@@ -164,16 +172,9 @@ function! s:EnsureCRWindow()
     endif
 endfunction
 
-function! s:OpenCRWindow()
+function! s:OpenCRWindow(output)
     call s:EnsureCRWindow()
-    
-    let win_nr = bufwinnr(g:ollama_cr_window)
-    if win_nr != -1
-        execute win_nr . 'wincmd w'
-        return
-    endif
-    
-    execute g:ollama_window_position g:ollama_window_size . 'new' g:ollama_cr_window
+    execute "rightbelow new" g:ollama_cr_window
     setlocal buftype=nofile
     setlocal bufhidden=hide
     setlocal noswapfile
@@ -184,12 +185,10 @@ function! s:OpenCRWindow()
     setlocal nonumber
     setlocal modifiable
     
-    if !exists('g:ollama_no_syntax')
-        syntax enable
-        set syntax=markdown
-    endif
-    
-    wincmd p
+    execute 'normal! ggdG'
+    let lines = split(a:output, "\n")
+    call append(0, lines)
+    normal! gg
 endfunction
 
 function! s:EscapeInput(input)
@@ -197,6 +196,8 @@ function! s:EscapeInput(input)
     let escaped = substitute(escaped, '"', '\\"', "g")
     let escaped = substitute(escaped, '`', '\\`', "g")
     let escaped = substitute(escaped, '\$', '\\$', "g")
+    let escaped = substitute(escaped, '%', '%%', "g") " Escape % for printf
+    let escaped = substitute(escaped, '\n', '\\n', "g")
     return escaped
 endfunction
 
@@ -214,17 +215,18 @@ endfunction
 
 function! s:ProcessWithOllama(mode, with_question) abort
     let selection = ''
-    
+
+    " Get selected text
     if a:mode ==# 'v'
         let [line_start, column_start] = getpos("'<")[1:2]
         let [line_end, column_end] = getpos("'>")[1:2]
         let lines = getline(line_start, line_end)
-        
+
         if len(lines) == 0
             call s:DisplayError("No text selected")
             return
         endif
-        
+
         if len(lines) == 1
             let selection = lines[0][column_start - 1:column_end - 1]
         else
@@ -235,15 +237,16 @@ function! s:ProcessWithOllama(mode, with_question) abort
     else
         let selection = join(getline(1, '$'), "\n")
     endif
-    
+
     if empty(selection)
         call s:DisplayError("No text to process")
         return
     endif
-    
+
     let escaped_selection = s:EscapeInput(selection)
-    let command = ''
-    
+
+    " Handle user input for question
+    let prompt = ''
     if a:with_question
         let prompt = input('Enter your question: ')
         if empty(prompt)
@@ -251,27 +254,54 @@ function! s:ProcessWithOllama(mode, with_question) abort
             return
         endif
         let escaped_prompt = s:EscapeInput(prompt)
+    endif
+
+    " Check if model is available
+    let check_command = "ollama list"
+    call s:SetStatus('Checking for model...')
+    let check_output = system(check_command)
+
+    if match(check_output, g:ollama_model) < 0
+        " Model not found, open terminal to download
+        call s:SetStatus('Model not found. Downloading...')
+
+        " Open a terminal split to run `ollama pull`
+        execute 'belowright 10split | terminal ++close ollama pull ' . g:ollama_model
+
+        " Inform the user to monitor the terminal
+        echom "Terminal opened. Monitor the download and close the terminal when it completes."
+        return
+    endif
+
+    " Recheck if the model is available
+    let recheck_output = system(check_command)
+    if match(recheck_output, g:ollama_model) < 0
+        call s:DisplayError("Failed to download model: " . g:ollama_model)
+        return
+    endif
+
+    call s:SetStatus('Model download complete.')
+
+    " Build the command
+    let command = ''
+    if a:with_question
         let command = printf(
-        \   "echo '%s\nQuestion: %s' | timeout %d ollama run %s --max-tokens %d 2>/dev/null",
+        \   "echo '%s\nQuestion: %s' | ollama run %s 2> /dev/null | tr '\\0' '\\n' | sed -u 's/\r//g'",
         \   escaped_selection,
         \   escaped_prompt,
-        \   g:ollama_timeout,
-        \   g:ollama_model,
-        \   g:ollama_max_tokens
+        \   g:ollama_model
         \)
     else
         let command = printf(
-        \   "echo '%s' | timeout %d ollama run %s --max-tokens %d 2>/dev/null",
+        \   "echo '%s' | ollama run %s 2>&1 /dev/null | tr '\\0' '\\n' | sed -u 's/\r//g'",
         \   escaped_selection,
-        \   g:ollama_timeout,
-        \   g:ollama_model,
-        \   g:ollama_max_tokens
+        \   g:ollama_model
         \)
     endif
-    
+
     call s:SetStatus('Processing with Ollama...')
     let output = system(command)
-    
+
     if v:shell_error
         if v:shell_error == 124
             call s:DisplayError("Request timed out after " . g:ollama_timeout . " seconds")
@@ -280,17 +310,18 @@ function! s:ProcessWithOllama(mode, with_question) abort
         endif
         return
     endif
-    
-    call s:OpenCRWindow()
-    let current_window = winnr()
-    execute bufwinnr(g:ollama_cr_window) . 'wincmd w'
-    
-    silent! normal! ggdG
-    call setline(1, split(output, "\n"))
-    normal! gg
-    
-    execute current_window . 'wincmd w'
-    call s:SetStatus('Done')
+
+    call RestoreStatusLine()
+    call s:OpenCRWindow(output)
+endfunction
+
+" Set the status line text
+function! s:SetStatus(message)
+    " Clear the status line and set the new message
+    redraw
+    echohl Special
+    echon a:message
+    echohl None
 endfunction
 
 " Public Interface
