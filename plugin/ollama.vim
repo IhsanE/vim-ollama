@@ -182,6 +182,7 @@ function! s:OpenCRWindow()
     setlocal wrap
     setlocal linebreak
     setlocal nonumber
+    setlocal modifiable
     
     if !exists('g:ollama_no_syntax')
         syntax enable
