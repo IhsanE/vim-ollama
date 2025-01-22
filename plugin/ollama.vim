@@ -89,6 +89,50 @@ function! s:InstallWindows()
     return 0
 endfunction
 
+function! s:InstallModel(model)
+    if !s:HasCommand('ollama')
+        call s:DisplayError('Ollama must be installed before installing models')
+        return 0
+    endif
+    
+    call s:SetStatus('Installing model ' . a:model . '...')
+    let l:install_result = system('ollama pull ' . a:model)
+    
+    if v:shell_error
+        call s:DisplayError('Failed to install model ' . a:model)
+        return 0
+    endif
+    
+    call s:SetStatus('Model ' . a:model . ' installed successfully')
+    return 1
+endfunction
+
+function! ollama#InstallDependencies()
+    let l:ollama_installed = s:HasCommand('ollama')
+    
+    if !l:ollama_installed
+        let l:install_choice = confirm('Ollama is not installed. Would you like to install it now?', "&Yes\n&No", 1)
+        if l:install_choice != 1
+            return 0
+        endif
+        
+        if !s:InstallOllama()
+            return 0
+        endif
+    endif
+    
+    " Check if the configured model exists
+    let l:model_check = system('ollama list | grep ' . g:ollama_model)
+    if v:shell_error && g:ollama_auto_install_model
+        call s:SetStatus('Model ' . g:ollama_model . ' not found. Installing...')
+        if !s:InstallModel(g:ollama_model)
+            return 0
+        endif
+    endif
+    
+    return 1
+endfunction
+
 function! s:StartOllamaService()
     call s:SetStatus('Starting Ollama service...')
     
